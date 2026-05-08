@@ -12,7 +12,7 @@ services:
       timeout: 5s
       retries: 10
     ports:
-     - 8888:8888
+      - 8888:8888
 
   discovery-server:
     image: springcommunity/spring-petclinic-discovery-server
@@ -30,11 +30,35 @@ services:
       config-server:
         condition: service_healthy
     ports:
-     - 8761:8761
+      - 8761:8761
+
+  mysql:
+    image: mysql:8.4.5
+    container_name: mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=petclinic
+      - MYSQL_DATABASE=petclinic
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ppetclinic"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    ports:
+      - 3306:3306
 
   customers-service:
     image: springcommunity/spring-petclinic-customers-service
     container_name: customers-service
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker,mysql
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/petclinic?allowPublicKeyRetrieval=true&useSSL=false
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=petclinic
     deploy:
       resources:
         limits:
@@ -44,27 +68,42 @@ services:
         condition: service_healthy
       discovery-server:
         condition: service_healthy
+      mysql:
+        condition: service_healthy
     ports:
-    - 8081:8081
+      - 8081:8081
 
   visits-service:
     image: springcommunity/spring-petclinic-visits-service
     container_name: visits-service
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker,mysql
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/petclinic?allowPublicKeyRetrieval=true&useSSL=false
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=petclinic
     deploy:
       resources:
         limits:
           memory: 512M
+    restart: on-failure
     depends_on:
       config-server:
         condition: service_healthy
       discovery-server:
         condition: service_healthy
+      mysql:
+        condition: service_healthy
     ports:
-     - 8082:8082
+      - 8082:8082
 
   vets-service:
     image: springcommunity/spring-petclinic-vets-service
     container_name: vets-service
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker,mysql
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/petclinic?allowPublicKeyRetrieval=true&useSSL=false
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=petclinic
     deploy:
       resources:
         limits:
@@ -74,17 +113,19 @@ services:
         condition: service_healthy
       discovery-server:
         condition: service_healthy
+      mysql:
+        condition: service_healthy
     ports:
-     - 8083:8083
-
+      - 8083:8083
 
   genai-service:
     image: springcommunity/spring-petclinic-genai-service
     container_name: genai-service
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY}
-      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - SPRING_PROFILES_ACTIVE=docker
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-demo}
+      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY:-}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
     deploy:
       resources:
         limits:
@@ -95,8 +136,7 @@ services:
       discovery-server:
         condition: service_healthy
     ports:
-     - 8084:8084
-
+      - 8084:8084
 
   api-gateway:
     image: springcommunity/spring-petclinic-api-gateway
@@ -111,7 +151,7 @@ services:
       discovery-server:
         condition: service_healthy
     ports:
-     - 8080:8080
+      - 8080:8080
 
   tracing-server:
     image: openzipkin/zipkin
@@ -121,7 +161,7 @@ services:
         limits:
           memory: 512M
     ports:
-     - 9411:9411
+      - 9411:9411
 
   admin-server:
     image: springcommunity/spring-petclinic-admin-server
@@ -136,9 +176,7 @@ services:
       discovery-server:
         condition: service_healthy
     ports:
-     - 9090:9090
-
-  ## Grafana / Prometheus
+      - 9090:9090
 
   grafana-server:
     build: ./docker/grafana
@@ -148,7 +186,7 @@ services:
         limits:
           memory: 256M
     ports:
-    - 3030:3000
+      - 3030:3000
 
   prometheus-server:
     build: ./docker/prometheus
@@ -158,4 +196,4 @@ services:
         limits:
           memory: 256M
     ports:
-    - 9091:9090
+      - 9091:9090
