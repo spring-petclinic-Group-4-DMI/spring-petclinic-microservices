@@ -1,0 +1,156 @@
+##############################################################################
+# GitHub Actions CI/CD Pipeline
+# Builds all Spring PetClinic microservices and pushes Docker images to ECR
+#
+# Triggers:
+#   - Push to staging branch (deploy to staging ECR)
+#   - Push to main branch (deploy to production ECR)
+#   - Pull requests to staging (build only, no push)
+##############################################################################
+
+name: Build and Push Docker Images to ECR
+
+on:
+  push:
+    branches: [staging, main]
+  pull_request:
+    branches: [staging]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY_PREFIX: petclinic
+  JAVA_VERSION: "17"
+
+jobs:
+  # ==========================================================================
+  # Job 1: Build all services with Maven (shared step)
+  # ==========================================================================
+  build:
+    name: Build with Maven
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: "temurin"
+          cache: maven
+
+      - name: Build all services
+        run: ./mvnw -B clean package -DskipTests
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-jars
+          path: |
+            spring-petclinic-*/target/*.jar
+          retention-days: 1
+
+  # ==========================================================================
+  # Job 2: Build Docker images and push to ECR
+  # ==========================================================================
+  docker:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push'
+
+    strategy:
+      matrix:
+        service:
+          - name: spring-petclinic-config-server
+            port: 8888
+          - name: spring-petclinic-discovery-server
+            port: 8761
+          - name: spring-petclinic-api-gateway
+            port: 8080
+          - name: spring-petclinic-customers-service
+            port: 8081
+          - name: spring-petclinic-vets-service
+            port: 8083
+          - name: spring-petclinic-visits-service
+            port: 8082
+          - name: spring-petclinic-genai-service
+            port: 8084
+          - name: spring-petclinic-admin-server
+            port: 9090
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: service-jars
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: tag
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          BRANCH=${{ github.ref_name }}
+          echo "sha_tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "branch_tag=${BRANCH}" >> $GITHUB_OUTPUT
+          echo "latest_tag=latest" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f ${{ matrix.service.name }}/Dockerfile \
+            --build-arg EXPOSED_PORT=${{ matrix.service.port }} \
+            -t ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/${{ matrix.service.name }}:${{ steps.tag.outputs.sha_tag }} \
+            -t ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/${{ matrix.service.name }}:${{ steps.tag.outputs.branch_tag }} \
+            -t ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/${{ matrix.service.name }}:${{ steps.tag.outputs.latest_tag }} \
+            ${{ matrix.service.name }}
+
+      - name: Push Docker image to ECR
+        run: |
+          docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/${{ matrix.service.name }}:${{ steps.tag.outputs.sha_tag }}
+          docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/${{ matrix.service.name }}:${{ steps.tag.outputs.branch_tag }}
+          docker push ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/${{ matrix.service.name }}:${{ steps.tag.outputs.latest_tag }}
+
+      - name: Output image URI
+        run: |
+          echo "### 🐳 Image Pushed" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** ${{ matrix.service.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REGISTRY_PREFIX }}/${{ matrix.service.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:** ${{ steps.tag.outputs.sha_tag }}, ${{ steps.tag.outputs.branch_tag }}, latest" >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================================================
+  # Job 3: Update Helm values with new image tags (optional - for GitOps)
+  # ==========================================================================
+  notify:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Summary
+        run: |
+          echo "### ✅ All images pushed to ECR" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** $(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ArgoCD will auto-sync the new images if image updater is configured." >> $GITHUB_STEP_SUMMARY
