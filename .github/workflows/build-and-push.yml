@@ -1,0 +1,84 @@
+name: Build and Push to ECR
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 428101261622.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPO_PREFIX: spring-petclinic
+  INFRA_REPO: spring-petclinic-Group-4-DMI/spring-petclinic-Group-4-infra
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'adopt'
+          cache: maven
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker images via Spring Boot Maven plugin
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
+        run: |
+          for SERVICE in admin-server api-gateway config-server customers-service discovery-server genai-service vets-service visits-service; do
+            MODULE="spring-petclinic-${SERVICE}"
+            IMAGE="${ECR_REGISTRY}/${ECR_REPO_PREFIX}/${SERVICE}"
+
+            echo "Building and pushing ${SERVICE}..."
+            mvn -B spring-boot:build-image \
+              -pl ${MODULE} \
+              -DskipTests \
+              -Dspring-boot.build-image.imageName=${IMAGE}:${IMAGE_TAG} \
+              -Dspring-boot.build-image.publish=true \
+              -Dspring-boot.build-image.publishRegistry.url=${ECR_REGISTRY} \
+              -Dspring-boot.build-image.publishRegistry.username=AWS \
+              -Dspring-boot.build-image.publishRegistry.password=$(aws ecr get-login-password --region ${AWS_REGION})
+
+            echo "Tagging ${SERVICE} as latest..."
+            docker tag ${IMAGE}:${IMAGE_TAG} ${IMAGE}:latest
+            docker push ${IMAGE}:latest
+
+            echo "${SERVICE} pushed successfully"
+          done
+
+      - name: Trigger Helm tag update in infra repo
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.IMAGE_TAG }}
+          INFRA_REPO_PAT: ${{ secrets.INFRA_REPO_PAT }}
+        run: |
+          for SERVICE in admin-server api-gateway config-server customers-service discovery-server genai-service vets-service visits-service; do
+            echo "Updating Helm tag for ${SERVICE}..."
+            curl -X POST \
+              -H "Authorization: token ${INFRA_REPO_PAT}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              https://api.github.com/repos/${INFRA_REPO}/dispatches \
+              -d "{\"event_type\": \"update-image-tag\", \"client_payload\": {\"service\": \"${SERVICE}\", \"tag\": \"${IMAGE_TAG}\"}}"
+          done
